@@ -1,0 +1,10 @@
+discord
+discord.py[voice]
+aiohttp
+asyncio
+beautifulsoup4
+spotipy
+requests
+youtube_dl
+ffmpeg
+PyNaCl
