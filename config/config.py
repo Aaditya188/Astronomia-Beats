@@ -1,6 +1,6 @@
-BOT_TOKEN: str = ""
-SPOTIFY_ID: str = ""
-SPOTIFY_SECRET: str = ""
+BOT_TOKEN: str = "TOKEN"
+SPOTIFY_ID: str = "SPOTIFY ID"
+SPOTIFY_SECRET: str = "SECRET KEY"
 
 BOT_PREFIX = "$"
 
