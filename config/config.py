@@ -5,6 +5,9 @@ import jsonc
 import inspect
 import warnings
 from typing import Optional
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, os.path.dirname(__file__))
 from utils import (
@@ -19,11 +22,10 @@ from utils import (
 
 del sys.path[0]
 
-
 class Config:
-    BOT_TOKEN = os.getenv('BOT_TOKEN')
-    SPOTIFY_ID = os.getenv('SPOTIFY_ID')
-    SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
+    BOT_TOKEN: str = os.getenv('BOT_TOKEN')
+    SPOTIFY_ID: str = os.getenv('SPOTIFY_ID')
+    SPOTIFY_SECRET: str = os.getenv('SPOTIFY_SECRET')
 
     # set to empty string to disable
     BOT_PREFIX = "$"

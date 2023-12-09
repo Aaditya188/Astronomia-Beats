@@ -8,4 +8,5 @@ SQLAlchemy[asyncio]==2.0.23
 alembic==1.12.1
 aioconsole==0.6.2
 gunicron
+python-dotenv
 ./config
