@@ -1,84 +1,98 @@
-import discord
-import os
-from discord.ext import commands, tasks
-from random import choice
-from config import config
-from musicbot.audiocontroller import AudioController
-from musicbot.settings import Settings
-from musicbot import utils
-from musicbot.utils import guild_to_audiocontroller, guild_to_settings
-
-from musicbot.commands.general import General
+"""
+This file uses some magic to make running Dandelion
+in the background easier
+Head to musicbot/__main__.py if you want to see "real" main file
+"""
 
 
-initial_extensions = ['musicbot.commands.music',
-                      'musicbot.commands.general', 'musicbot.plugins.button']
-bot = commands.Bot(command_prefix=config.BOT_PREFIX, pm_help=True, case_insensitive=True)
+def main():
+    import sys
 
-status = ['Jamming out to music!', 'Eating!', 'Sleeping!', 'Translating!', 'Chilling']
+    if "--run" in sys.argv:
+        import runpy
 
-if __name__ == '__main__':
+        runpy.run_module("musicbot", run_name="__main__")
+        # reminder: there's no `exit` in frozen environment
+        sys.exit()
 
-    config.ABSOLUTE_PATH = os.path.dirname(os.path.abspath(__file__))
-    config.COOKIE_PATH = config.ABSOLUTE_PATH + config.COOKIE_PATH
+    import signal
+    import subprocess
 
-    if config.BOT_TOKEN == "":
-        print("Error: No bot token!")
-        exit
+    print("You can close this window and the bot will run in the background")
+    print("To stop the bot, press Ctrl+C")
 
-    for extension in initial_extensions:
-        try:
-            bot.load_extension(extension)
-        except Exception as e:
-            print(e)
+    on_windows = sys.platform == "win32"
 
+    if on_windows:
+        import ctypes
+        import ctypes.wintypes
 
-@bot.event
-async def on_ready():
-    change_status.start()
-    print(config.STARTUP_MESSAGE)
+        SetHandler = ctypes.windll.kernel32.SetConsoleCtrlHandler
 
-    for guild in bot.guilds:
-        await register(guild)
-        print("Joined {}".format(guild.name))
+        handler_type = ctypes.WINFUNCTYPE(None, ctypes.wintypes.DWORD)
+        SetHandler.argtypes = (handler_type, ctypes.c_bool)
 
-    print(config.STARTUP_COMPLETE_MESSAGE)
+        @handler_type
+        def handler(event):
+            if event != signal.CTRL_C_EVENT:
+                return
+            p.stdin.write("shutdown\n")
+            p.stdin.flush()
 
-
-@bot.event
-async def on_guild_join(guild):
-    print(guild.name)
-    await register(guild)
-
-
-async def register(guild):
-
-    guild_to_settings[guild] = Settings(guild)
-    guild_to_audiocontroller[guild] = AudioController(bot, guild)
-
-    vc_channels = guild.voice_channels
-    await guild.me.edit(nick=guild_to_settings[guild].get('default_nickname'))
-    start_vc = guild_to_settings[guild].get('start_voice_channel')
-    if start_vc != None:
-        for vc in vc_channels:
-            if vc.id == start_vc:
-                await guild_to_audiocontroller[guild].register_voice_channel(vc_channels[vc_channels.index(vc)])
-                await General.udisconnect(self=None, ctx=None, guild=guild)
-                try:
-                    await guild_to_audiocontroller[guild].register_voice_channel(vc_channels[vc_channels.index(vc)])
-                except Exception as e:
-                    print(e)
+        kwargs = {
+            "creationflags": subprocess.CREATE_NO_WINDOW
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+        }
     else:
-        await guild_to_audiocontroller[guild].register_voice_channel(guild.voice_channels[0])
-        await General.udisconnect(self=None, ctx=None, guild=guild)
-        try:
-            await guild_to_audiocontroller[guild].register_voice_channel(guild.voice_channels[0])
-        except Exception as e:
-            print(e)
+        kwargs = {"start_new_session": True}
 
-@tasks.loop(seconds=20)
-async def change_status():
-    await bot.change_presence(activity=discord.Game(choice(status)))
+    p = subprocess.Popen(
+        # sys.executable may be python interpreter or pyinstaller exe
+        [sys.executable, __file__, "--run"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        **kwargs,
+    )
+
+    def new_handler(sig, frame):
+        """Handle the first interrupt and ignore others
+        to prevent showing error instead of subprocess output"""
+        nonlocal default_sigint_handler
+        h = default_sigint_handler
+        if h:
+            default_sigint_handler = None
+            h(sig, frame)
+
+    default_sigint_handler = signal.signal(signal.SIGINT, new_handler)
+    if on_windows and not SetHandler(handler, True):
+        print(
+            "Failed to set Ctrl+C handler!\n"
+            "The bot may not react to this key combination.\n"
+            "Please report this bug.",
+            file=sys.stderr,
+        )
+        # can't use windows behaviour
+        on_windows = False
+
+    try:
+        while line := p.stdout.readline():
+            print(line, end="")
+    except KeyboardInterrupt:
+        if not on_windows:
+            p.stdin.write("shutdown\n")
+            p.stdin.flush()
+        print(p.stdout.read(), end="")
+
+    exit_code = p.wait()
+    if exit_code != 0 and sys.stdin.isatty():
+        input("Press Enter to exit... ")
+    sys.exit(exit_code)
 
 
-bot.run(config.BOT_TOKEN, bot=True, reconnect=True)
+if __name__ == "__main__":
+    from multiprocessing import freeze_support
+
+    freeze_support()
+    main()

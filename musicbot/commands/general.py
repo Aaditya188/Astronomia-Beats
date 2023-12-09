@@ -1,135 +1,144 @@
-from discord.ext import commands
-from discord.ext.commands import has_permissions
+import sys
+import asyncio
+
+import discord
+from discord.ext import commands, bridge
 
 from config import config
-from musicbot import utils
+from musicbot.bot import Context, MusicBot
+from musicbot.settings import CONFIG_OPTIONS, ConversionError
 from musicbot.audiocontroller import AudioController
-from musicbot.utils import guild_to_audiocontroller, guild_to_settings
+from musicbot.utils import dj_check, voice_check
 
 
 class General(commands.Cog):
+    """A collection of the commands for moving the bot around in you server.
 
-    def __init__(self, bot):
+    Attributes:
+        bot: The instance of the bot that is executing the commands.
+    """
+
+    def __init__(self, bot: MusicBot):
         self.bot = bot
 
     # logic is split to uconnect() for wide usage
-    @commands.command(name='connect', description=config.HELP_CONNECT_LONG, help=config.HELP_CONNECT_SHORT, aliases=['c'])
-    async def _connect(self, ctx):  # dest_channel_name: str
-        await self.uconnect(ctx)
+    @bridge.bridge_command(
+        name="connect",
+        description=config.HELP_CONNECT_LONG,
+        help=config.HELP_CONNECT_SHORT,
+        aliases=["c", "cc"],  # this command replaces removed changechannel
+    )
+    @commands.check(voice_check)
+    async def _connect(self, ctx: Context):
+        audiocontroller = ctx.bot.audio_controllers[ctx.guild]
+        await audiocontroller.uconnect(ctx, move=True)
+        await ctx.send("Connected.")
 
-    async def uconnect(self, ctx):
-
-        vchannel = await utils.is_connected(ctx)
-
-        if vchannel is not None:
-            await ctx.send(config.ALREADY_CONNECTED_MESSAGE)
-            return
-
-        current_guild = utils.get_guild(self.bot, ctx.message)
-
-        if current_guild is None:
-            await ctx.send(config.NO_GUILD_MESSAGE)
-            return
-
-        if utils.guild_to_audiocontroller[current_guild] is None:
-            utils.guild_to_audiocontroller[current_guild] = AudioController(
-                self.bot, current_guild)
-
-        guild_to_audiocontroller[current_guild] = AudioController(
-            self.bot, current_guild)
-        await guild_to_audiocontroller[current_guild].register_voice_channel(ctx.author.voice.channel)
-
-        await ctx.send("Connected to {} {}".format(ctx.author.voice.channel.name, ":white_check_mark:"))
-
-    @commands.command(name='disconnect', description=config.HELP_DISCONNECT_LONG, help=config.HELP_DISCONNECT_SHORT, aliases=['dc'])
-    async def _disconnect(self, ctx, guild=False):
-        await self.udisconnect(ctx, guild)
-
-    async def udisconnect(self, ctx, guild):
-
-        if guild is not False:
-
-            current_guild = guild
-
-            await utils.guild_to_audiocontroller[current_guild].stop_player()
-            await current_guild.voice_client.disconnect(force=True)
-
+    @bridge.bridge_command(
+        name="disconnect",
+        description=config.HELP_DISCONNECT_LONG,
+        help=config.HELP_DISCONNECT_SHORT,
+        aliases=["dc"],
+    )
+    @commands.check(voice_check)
+    async def _disconnect(self, ctx: Context):
+        audiocontroller = ctx.bot.audio_controllers[ctx.guild]
+        if await audiocontroller.udisconnect():
+            await ctx.send("Disconnected.")
         else:
-            current_guild = utils.get_guild(self.bot, ctx.message)
+            await ctx.send(config.NOT_CONNECTED_MESSAGE)
 
-            if current_guild is None:
-                await ctx.send(config.NO_GUILD_MESSAGE)
-                return
+    @bridge.bridge_command(
+        name="reset",
+        description=config.HELP_RESET_LONG,
+        help=config.HELP_RESET_SHORT,
+        aliases=["rs", "restart"],
+    )
+    @commands.check(voice_check)
+    async def _reset(self, ctx: Context):
+        await ctx.defer()
+        if await ctx.bot.audio_controllers[ctx.guild].udisconnect():
+            # bot was connected and need some rest
+            await asyncio.sleep(1)
 
-            if await utils.is_connected(ctx) is None:
-                await ctx.send(config.NO_GUILD_MESSAGE)
-                return
+        audiocontroller = ctx.bot.audio_controllers[
+            ctx.guild
+        ] = AudioController(self.bot, ctx.guild)
+        await audiocontroller.uconnect(ctx)
+        await ctx.send(
+            "{} Connected to {}".format(
+                ":white_check_mark:", ctx.author.voice.channel.name
+            )
+        )
 
-            await utils.guild_to_audiocontroller[current_guild].stop_player()
-            await current_guild.voice_client.disconnect(force=True)
-            await ctx.send("Disconnected from voice channel. Use '{}c' to rejoin.".format(config.BOT_PREFIX))
-
-    @commands.command(name='reset', description=config.HELP_DISCONNECT_LONG, help=config.HELP_DISCONNECT_SHORT, aliases=['rs', 'restart'])
-    async def _reset(self, ctx):
-        current_guild = utils.get_guild(self.bot, ctx.message)
-
-        if current_guild is None:
-            await ctx.send(config.NO_GUILD_MESSAGE)
-            return
-        await utils.guild_to_audiocontroller[current_guild].stop_player()
-        await current_guild.voice_client.disconnect(force=True)
-
-        guild_to_audiocontroller[current_guild] = AudioController(
-            self.bot, current_guild)
-        await guild_to_audiocontroller[current_guild].register_voice_channel(ctx.author.voice.channel)
-
-        await ctx.send("{} Connected to {}".format(":white_check_mark:", ctx.author.voice.channel.name))
-
-    @commands.command(name='changechannel', description=config.HELP_CHANGECHANNEL_LONG, help=config.HELP_CHANGECHANNEL_SHORT, aliases=['cc'])
-    async def _change_channel(self, ctx):
-        current_guild = utils.get_guild(self.bot, ctx.message)
-
-        vchannel = await utils.is_connected(ctx)
-        if vchannel == ctx.author.voice.channel:
-            await ctx.send("{} Already connected to {}".format(":white_check_mark:", vchannel.name))
-            return
-
-        if current_guild is None:
-            await ctx.send(config.NO_GUILD_MESSAGE)
-            return
-        await utils.guild_to_audiocontroller[current_guild].stop_player()
-        await current_guild.voice_client.disconnect(force=True)
-
-        guild_to_audiocontroller[current_guild] = AudioController(
-            self.bot, current_guild)
-        await guild_to_audiocontroller[current_guild].register_voice_channel(ctx.author.voice.channel)
-
-        await ctx.send("{} Switched to {}".format(":white_check_mark:", ctx.author.voice.channel.name))
-
-    @commands.command(name='ping', description=config.HELP_PING_LONG, help=config.HELP_PING_SHORT)
+    @bridge.bridge_command(
+        name="ping",
+        description=config.HELP_PING_LONG,
+        help=config.HELP_PING_SHORT,
+    )
     async def _ping(self, ctx):
-        await ctx.send("Pong")
+        await ctx.send(f"Pong ({int(ctx.bot.latency * 1000)} ms)")
 
-    @commands.command(name='setting', description=config.HELP_SHUFFLE_LONG, help=config.HELP_SETTINGS_SHORT, aliases=['settings', 'set'])
-    @has_permissions(administrator=True)
-    async def _settings(self, ctx, *args):
+    @commands.command(
+        name="shutdown",
+        hidden=True,
+    )
+    @commands.is_owner()
+    async def _shutdown(self, ctx: Context):
+        await ctx.send("Shutting down...")
+        # hide SystemExit error message
+        sys.excepthook = lambda *_: None
+        sys.exit()
 
-        sett = guild_to_settings[ctx.guild]
-
-        if len(args) == 0:
-            await ctx.send(embed=await sett.format())
-            return
-
-        args_list = list(args)
-        args_list.remove(args[0])
-
-        response = await sett.write(args[0], " ".join(args_list), ctx)
-
-        if response is None:
+    @bridge.bridge_group(
+        name="setting",
+        description=config.HELP_SETTINGS_LONG,
+        help=config.HELP_SETTINGS_SHORT,
+        aliases=["settings", "set"],
+        usage="[setting_name setting_value]",
+        invoke_without_command=True,
+    )
+    async def _settings(self, ctx: Context, *, inexistent_setting=None):
+        if inexistent_setting is not None:
             await ctx.send("`Error: Setting not found`")
-        elif response is True:
+        else:
+            await self._show_settings_callback(ctx)
+
+    async def _show_settings_callback(self, ctx: Context):
+        sett = ctx.bot.settings[ctx.guild]
+        await ctx.send(embed=sett.format(ctx))
+
+    _show_settings = _settings.command(name="show")(_show_settings_callback)
+
+    for name, type_ in CONFIG_OPTIONS.items():
+
+        @_settings.command(name=name)
+        @commands.check(dj_check)
+        async def _set_setting(self, ctx: Context, *, value: type_):
+            sett = ctx.bot.settings[ctx.guild]
+            try:
+                await sett.update_setting(ctx.command.name, value, ctx)
+            except ConversionError as e:
+                await ctx.send(f"`Error: {e}`")
+                return
             await ctx.send("Setting updated!")
 
+    @bridge.bridge_command(
+        name="addbot",
+        description=config.HELP_ADDBOT_LONG,
+        help=config.HELP_ADDBOT_SHORT,
+    )
+    async def _addbot(self, ctx):
+        embed = discord.Embed(
+            title="Invite",
+            description=config.ADD_MESSAGE.format(
+                link=discord.utils.oauth_url(self.bot.user.id)
+            ),
+            color=config.EMBED_COLOR,
+        )
 
-def setup(bot):
+        await ctx.send(embed=embed)
+
+
+def setup(bot: MusicBot):
     bot.add_cog(General(bot))

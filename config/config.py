@@ -1,88 +1,233 @@
-BOT_TOKEN: str = "TOKEN"
-SPOTIFY_ID: str = "SPOTIFY ID"
-SPOTIFY_SECRET: str = "SECRET KEY"
+import os
+import sys
+import ast
+import jsonc
+import inspect
+import warnings
+from typing import Optional
 
-BOT_PREFIX = "$"
+sys.path.insert(0, os.path.dirname(__file__))
+from utils import (
+    CONFIG_DIRS,
+    Formatter,
+    get_env_var,
+    alchemize_url,
+    load_configs,
+    join_dicts,
+    subtract_dicts,
+)
 
-EMBED_COLOR = 0x4dd4d0  #replace after'0x' with desired hex code ex. '#ff0188' >> '0xff0188'
+del sys.path[0]
 
-SUPPORTED_EXTENSIONS = ('.webm', '.mp4', '.mp3', '.avi', '.wav', '.m4v', '.ogg', '.mov')
 
-MAX_SONG_PRELOAD = 5  #maximum of 25
+class Config:
+    BOT_TOKEN = os.getenv('BOT_TOKEN')
+    SPOTIFY_ID = os.getenv('SPOTIFY_ID')
+    SPOTIFY_SECRET = os.getenv('SPOTIFY_SECRET')
 
-COOKIE_PATH = "/config/cookies/cookies.txt"
+    # set to empty string to disable
+    BOT_PREFIX = "$"
+    ENABLE_SLASH_COMMANDS = False
+    MENTION_AS_PREFIX = True
 
-STARTUP_MESSAGE = "Starting Astronomical Enviornment..."
-STARTUP_COMPLETE_MESSAGE = "Enviornment Created"
+    # seconds
+    VC_TIMEOUT = 600
+    # default template setting for VC timeout
+    # true = yes, timeout; false = no timeout
+    VC_TIMEOUT_DEFAULT = True
+    # allow or disallow editing the vc_timeout guild setting
+    ALLOW_VC_TIMEOUT_EDIT = True
 
-NO_GUILD_MESSAGE = 'Error: Please join a voice channel or enter the command in guild chat'
-USER_NOT_IN_VC_MESSAGE = "Error: Please join the active voice channel to use commands"
-WRONG_CHANNEL_MESSAGE = "Error: Please use configured command channel"
-NOT_CONNECTED_MESSAGE = "Error: Bot not connected to any voice channel"
-ALREADY_CONNECTED_MESSAGE = "Error: Already connected to a voice channel"
-CHANNEL_NOT_FOUND_MESSAGE = "Error: Could not find channel "
-DEFAULT_CHANNEL_JOIN_FAILED = "Error: Could not join the default voice channel"
-INVALID_INVITE_MESSAGE = "Error: Invalid invitation link"
+    # maximum of 25
+    MAX_SONG_PRELOAD = 5
+    MAX_HISTORY_LENGTH = 10
+    MAX_TRACKNAME_HISTORY_LENGTH = 15
 
-ADD_MESSAGE_1 = """```To add this bot to your own Server, click the following link:
-                ```\n<https://discordapp.com/oauth2/authorize?client_id="""
-ADD_MESSAGE_2 = "&scope=bot>"
+    # if database is not one of sqlite, postgres or MySQL
+    # you need to provide the url in SQL Alchemy-supported format.
+    # Must be async-compatible
+    # CHANGE ONLY IF YOU KNOW WHAT YOU'RE DOING
+    DATABASE_URL = os.getenv("HEROKU_DB") or "sqlite:///settings.db"
 
-INFO_HISTORY_TITLE = "Songs Played:"
-MAX_HISTORY_LENGTH = 10
-MAX_TRACKNAME_HISTORY_LENGTH = 15
+    ENABLE_BUTTON_PLUGIN = True
 
-SONGINFO_UPLOADER = "Uploader: "
-SONGINFO_DURATION = "Duration: "
-SONGINFO_SECONDS = "s"
-SONGINFO_LIKES = "Likes: "
-SONGINFO_DISLIKES = "Dislikes: "
-SONGINFO_NOW_PLAYING = "Now Playing"
-SONGINFO_QUEUE_ADDED = "Added to queue"
-SONGINFO_SONGINFO = "Song info"
-SONGINFO_UNKNOWN_SITE = "Unknown site :question:"
-SONGINFO_PLAYLIST_QUEUED = "Queued playlist :page_with_curl:"
-SONGINFO_UNKNOWN_DURATION = "Unknown"
+    # replace after '0x' with desired hex code ex. '#ff0188' >> "0xff0188"
+    EMBED_COLOR: int = "0x4DD4D0"  # converted to int in __init__
 
-HELP_ADDBOT_SHORT = "Add Bot to another server"
-HELP_ADDBOT_LONG = "Gives you the link for adding this bot to another server of yours."
-HELP_CONNECT_SHORT = "Connect bot to voicechannel"
-HELP_CONNECT_LONG = "Connects the bot to the voice channel you are currently in"
-HELP_DISCONNECT_SHORT = "Disonnect bot from voicechannel"
-HELP_DISCONNECT_LONG = "Disconnect the bot from the voice channel and stop audio."
+    SUPPORTED_EXTENSIONS = (
+        ".webm",
+        ".mp4",
+        ".mp3",
+        ".avi",
+        ".wav",
+        ".m4v",
+        ".ogg",
+        ".mov",
+    )
 
-HELP_SETTINGS_SHORT = "View and set bot settings"
-HELP_SETTINGS_LONG = "View and set bot settings in the server. Usage: {}settings setting_name value".format(BOT_PREFIX)
+    COOKIE_PATH = "config/cookies/cookies.txt"
 
-HELP_HISTORY_SHORT = "Show history of songs"
-HELP_HISTORY_LONG = "Shows the " + str(MAX_TRACKNAME_HISTORY_LENGTH) + " last played songs."
-HELP_PAUSE_SHORT = "Pause Music"
-HELP_PAUSE_LONG = "Pauses the AudioPlayer. Playback can be continued with the resume command."
-HELP_VOL_SHORT = "Change volume %"
-HELP_VOL_LONG = "Changes the volume of the AudioPlayer. Argument specifies the % to which the volume should be set."
-HELP_PREV_SHORT = "Go back one Song"
-HELP_PREV_LONG = "Plays the previous song again."
-HELP_RESUME_SHORT = "Resume Music"
-HELP_RESUME_LONG = "Resumes the AudioPlayer."
-HELP_SKIP_SHORT = "Skip a song"
-HELP_SKIP_LONG = "Skips the currently playing song and goes to the next item in the queue."
-HELP_SONGINFO_SHORT = "Info about current Song"
-HELP_SONGINFO_LONG = "Shows details about the song currently being played and posts a link to the song."
-HELP_STOP_SHORT = "Stop Music"
-HELP_STOP_LONG = "Stops the AudioPlayer and clears the songqueue"
-HELP_YT_SHORT = "Play a supported link or search on youtube"
-HELP_YT_LONG = ("$p [link/video title/key words/playlist-link/soundcloud link/spotify link/bandcamp link/twitter link]")
-HELP_PING_SHORT = "Pong"
-HELP_PING_LONG = "Test bot response status"
-HELP_CLEAR_SHORT = "Clear the queue."
-HELP_CLEAR_LONG = "Clears the queue and skips the current song."
-HELP_LOOP_SHORT = "Loops the currently playing song, toggle on/off."
-HELP_LOOP_LONG = "Loops the currently playing song and locks the queue. Use the command again to disable loop."
-HELP_QUEUE_SHORT = "Shows the songs in queue."
-HELP_QUEUE_LONG = "Shows the number of songs in queue, up to 10."
-HELP_SHUFFLE_SHORT = "Shuffle the queue"
-HELP_SHUFFLE_LONG = "Randomly sort the songs in the current queue"
-HELP_CHANGECHANNEL_SHORT = "Change the bot channel"
-HELP_CHANGECHANNEL_LONG = "Change the bot channel to the VC you are in"
+    GLOBAL_DISABLE_AUTOJOIN_VC = False
 
-ABSOLUTE_PATH = '' #do not modify
+    def __init__(self):
+        current_cfg = self.load()
+
+        # prefix to display
+        current_cfg["prefix"] = (
+            self.BOT_PREFIX
+            if self.BOT_PREFIX
+            else ("/" if self.ENABLE_SLASH_COMMANDS else "@bot ")
+        )
+
+        self.DATABASE = alchemize_url(self.DATABASE_URL)
+        self.DATABASE_LIBRARY = self.DATABASE.partition("+")[2].partition(":")[
+            0
+        ]
+
+        self.EMBED_COLOR = int(self.EMBED_COLOR, 16)
+        for dir_ in CONFIG_DIRS[::-1]:
+            path = os.path.join(dir_, self.COOKIE_PATH)
+            if os.path.isfile(path):
+                self.COOKIE_PATH = path
+                break
+
+        data = join_dicts(
+            load_configs(
+                "en.json",
+                lambda d: {
+                    k: Formatter(v).format(current_cfg)
+                    if isinstance(v, str)
+                    else v
+                    for k, v in d.items()
+                },
+            )
+        )
+
+        self.messages = {}
+        self.dicts = {}
+        for k, v in data.items():
+            if isinstance(v, str):
+                self.messages[k] = v
+            elif isinstance(v, dict):
+                self.dicts[k] = v
+
+    def load(self) -> dict:
+        loaded_cfgs = load_configs(
+            "config.json",
+            lambda d: {
+                k: tuple(v) if isinstance(v, list) else v for k, v in d.items()
+            },
+        )
+
+        current_cfg = self.as_dict()
+        loaded_joined = join_dicts(loaded_cfgs)
+        # recognise deprecated cfg key with a typo
+        if "VC_TIMOUT_DEFAULT" in loaded_joined:
+            # in config, silently replace
+            current_cfg["VC_TIMEOUT_DEFAULT"] = loaded_joined.pop(
+                "VC_TIMOUT_DEFAULT"
+            )
+        if "VC_TIMOUT_DEFAULT" in os.environ:
+            # in env, we can't fix it easily
+            raise RuntimeError(
+                "Please rename VC_TIMOUT_DEFAULT"
+                " to VC_TIMEOUT_DEFAULT in your environment"
+            )
+        missing = subtract_dicts(current_cfg, loaded_joined)
+        self.unknown_vars = subtract_dicts(loaded_joined, current_cfg)
+
+        if missing:
+            missing.update(loaded_cfgs[-1])
+            self.to_save = missing
+        else:
+            self.to_save = None
+
+        current_cfg.update(loaded_joined)
+
+        for key, default in current_cfg.items():
+            current_cfg[key] = get_env_var(key, default)
+
+        # Embeds are limited to 25 fields
+        current_cfg["MAX_SONG_PRELOAD"] = min(
+            current_cfg["MAX_SONG_PRELOAD"], 25
+        )
+
+        self.update(current_cfg)
+        return current_cfg
+
+    def __getattr__(self, key: str) -> str:
+        try:
+            return self.messages[key]
+        except KeyError as e:
+            raise AttributeError(f"No text for {key!r} defined") from e
+
+    def get_dict(self, name: str) -> dict:
+        return self.dicts[name]
+
+    def save(self):
+        if not self.to_save:
+            return
+        comments = self.get_comments()
+        if comments:
+            # sort according to definition order
+            self.to_save = {
+                k: self.to_save[k] for k in comments if k in self.to_save
+            }
+        with open("config.json", "w") as f:
+            jsonc.dump(
+                self.to_save,
+                f,
+                indent=2,
+                trailing_comma=True,
+                comments=comments,
+            )
+            f.write("\n")
+        self.to_save = None
+
+    def warn_unknown_vars(self):
+        for name in self.unknown_vars:
+            warnings.warn(f"Unknown variable in config: {name}")
+
+    def update(self, data: dict):
+        for k, v in data.items():
+            setattr(self, k, v)
+
+    @classmethod
+    def as_dict(cls) -> dict:
+        return {
+            k: v
+            for k, v in inspect.getmembers(cls)
+            if not k.startswith("__") and not inspect.isroutine(v)
+        }
+
+    @classmethod
+    def get_comments(cls) -> Optional[dict]:
+        try:
+            src = inspect.getsource(cls)
+        except OSError:
+            fallback = os.path.join(
+                getattr(sys, "_MEIPASS", ""), "config_comments.json"
+            )
+            if os.path.isfile(fallback):
+                with open(fallback) as f:
+                    return jsonc.load(f)
+            return None
+        result = {}
+        body = ast.parse(src).body[0].body
+        src = src.splitlines()
+        for node in body:
+            if isinstance(node, ast.Assign):
+                target = node.targets[0]
+            elif isinstance(node, ast.AnnAssign):
+                target = node.target
+            else:
+                target = None
+            if target is not None:
+                comment = ""
+                for i in range(node.lineno - 2, -1, -1):
+                    line = src[i].strip()
+                    if line and not line.startswith("#"):
+                        break
+                    comment = line[1:].strip() + "\n" + comment
+                result[target.id] = comment
+        return result

@@ -1,91 +1,99 @@
 import discord
 from discord.ext import commands
+from musicbot import linkutils, utils
+from musicbot.bot import MusicBot
 
-from musicbot import utils
-from musicbot import linkutils
-
-from musicbot.commands.general import General
+SUPPORTED_SITES = (
+    linkutils.Sites.Spotify,
+    linkutils.Sites.Spotify_Playlist,
+    linkutils.Sites.YouTube,
+)
 
 
 class Button(commands.Cog):
-
-    def __init__(self, bot):
+    def __init__(self, bot: MusicBot):
         self.bot = bot
 
-    @commands.Cog.listener()
-    async def on_message(self, message):
-
-        sett = utils.guild_to_settings[message.guild]
-        button_name = sett.get('button_emote')
-
-        if button_name == "":
-            return
-
-        if message.author == self.bot.user:
-            return
-
-        host = linkutils.identify_url(message.content)
-
-        guild = message.guild
-        emoji = discord.utils.get(guild.emojis, name=button_name)
-
-        if host == linkutils.Sites.YouTube:
-            if emoji:
-                await message.add_reaction(emoji)
-
-        if host == linkutils.Sites.Spotify:
-            if emoji:
-                await message.add_reaction(emoji)
-
-        if host == linkutils.Sites.Spotify_Playlist:
-            if emoji:
-                await message.add_reaction(emoji)
+    @staticmethod
+    def get_links(text: str):
+        return [
+            link
+            for link in linkutils.get_urls(text)
+            if linkutils.identify_url(link) in SUPPORTED_SITES
+        ]
 
     @commands.Cog.listener()
-    async def on_raw_reaction_add(self, reaction):
+    async def on_message(self, message: discord.Message):
+        if not message.guild or message.author == self.bot.user:
+            return
 
+        await self.bot.absolutely_ready
+
+        sett = self.bot.settings[message.guild]
+        button = sett.button_emote
+
+        if not button:
+            return
+
+        emoji = utils.get_emoji(message.guild, button)
+        if not emoji:
+            return
+
+        if self.get_links(message.content):
+            await message.add_reaction(emoji)
+
+    @commands.Cog.listener()
+    async def on_raw_reaction_add(
+        self, reaction: discord.RawReactionActionEvent
+    ):
         serv = self.bot.get_guild(reaction.guild_id)
 
-        sett = utils.guild_to_settings[serv]
-        button_name = sett.get('button_emote')
+        member = reaction.member
+        user_vc = member.voice
 
-        if button_name == "":
+        if not serv or member.bot or not user_vc:
             return
 
-        if reaction.emoji.name == button_name:
-            channels = serv.text_channels
+        sett = self.bot.settings[serv]
+        button = sett.button_emote
 
-            for chan in channels:
-                if chan.id == reaction.channel_id:
-                    if reaction.member == self.bot.user:
-                        return
+        if not button:
+            return
 
-                    try:
-                        if reaction.member.voice.channel == None:
-                            return
-                    except:
-                        message = await chan.fetch_message(reaction.message_id)
-                        await message.remove_reaction(reaction.emoji, reaction.member)
-                        return
-                    message = await chan.fetch_message(reaction.message_id)
-                    await message.remove_reaction(reaction.emoji, reaction.member)
+        if (
+            reaction.emoji.name == button
+            or str(reaction.emoji.id or "") == button
+        ):
+            chan = serv.get_channel(reaction.channel_id)
+            message = await chan.fetch_message(reaction.message_id)
 
-            current_guild = utils.get_guild(self.bot, message)
-            audiocontroller = utils.guild_to_audiocontroller[current_guild]
+            links = self.get_links(message.content)
 
-            url = linkutils.get_url(message.content)
+            if not links:
+                return
 
-            host = linkutils.identify_url(url)
+            if chan.permissions_for(serv.me).manage_messages:
+                await message.remove_reaction(reaction.emoji, member)
 
-            if host == linkutils.Sites.Spotify:
+            audiocontroller = self.bot.audio_controllers[serv]
+
+            ctx = await self.bot.get_context(message)
+            # author is the user who added the reaction,
+            # not the one who sent the message
+            ctx.author = member
+            try:
+                if not await utils.voice_check(ctx):
+                    return
+            except utils.CheckError:
+                return
+            await audiocontroller.register_voice_channel(user_vc.channel)
+            if not audiocontroller.command_channel and sett.command_channel:
+                audiocontroller.command_channel = serv.get_channel(
+                    int(sett.command_channel)
+                )
+            for url in links:
                 await audiocontroller.process_song(url)
 
-            if host == linkutils.Sites.Spotify.Spotify_Playlist:
-                await audiocontroller.process_song(url)
 
-            if host == linkutils.Sites.YouTube:
-                await audiocontroller.process_song(url)
-
-
-def setup(bot):
+def setup(bot: MusicBot):
     bot.add_cog(Button(bot))

@@ -1,45 +1,233 @@
-import discord
-import youtube_dl
-
+import sys
 import asyncio
-import concurrent.futures
+from itertools import islice
+from inspect import isawaitable
+from typing import TYPE_CHECKING, Coroutine, Optional
 
-from musicbot import linkutils
-from musicbot import utils
-
+import discord
 from config import config
-from musicbot.playlist import Playlist
-from musicbot.songinfo import Song
 
-from musicbot.utils import guild_to_settings
+from musicbot import linkutils, utils, loader
+from musicbot.playlist import Playlist, LoopMode, LoopState, PauseState
+from musicbot.songinfo import Song
+from musicbot.utils import CheckError, play_check
+
+# avoiding circular import
+if TYPE_CHECKING:
+    from musicbot.bot import MusicBot
+
+
+VC_TIMEOUT = 10
+_not_provided = object()
+
+
+class MusicButton(discord.ui.Button):
+    def __init__(self, callback, **kwargs):
+        super().__init__(**kwargs)
+        self._callback = callback
+
+    async def callback(self, inter):
+        ctx = await inter.client.get_application_context(inter)
+        try:
+            await play_check(ctx)
+        except CheckError as e:
+            await ctx.send(e, ephemeral=True)
+            return
+        await inter.response.defer()
+        res = self._callback(ctx)
+        if isawaitable(res):
+            await res
 
 
 class AudioController(object):
+    """Controls the playback of audio and the sequential playing of the songs.
 
-    def __init__(self, bot, guild):
+    Attributes:
+        bot: The instance of the bot that will be playing the music.
+        playlist: A Playlist object that stores the history and queue of songs.
+        current_song: A Song object that stores details of the current song.
+        guild: The guild in which the Audiocontroller operates.
+    """
+
+    def __init__(self, bot: "MusicBot", guild: discord.Guild):
         self.bot = bot
         self.playlist = Playlist()
         self.current_song = None
+        self._next_song = None
         self.guild = guild
-        self.voice_client = None
 
-        sett = utils.guild_to_settings[guild]
-        self._volume = sett.get('default_volume')
+        sett = bot.settings[guild]
+        self._volume: int = sett.default_volume
+
+        self.timer = utils.Timer(self.timeout_handler)
+
+        self.command_channel: Optional[discord.abc.Messageable] = None
+
+        self.last_message = None
+        self.last_view = None
+
+        # according to Python documentation, we need
+        # to keep strong references to all tasks
+        self._tasks = set()
+
+        self.message_lock = asyncio.Lock()
 
     @property
-    def volume(self):
+    def volume(self) -> int:
         return self._volume
 
     @volume.setter
-    def volume(self, value):
+    def volume(self, value: int):
         self._volume = value
         try:
-            self.voice_client.source.volume = float(value) / 100.0
-        except Exception as e:
+            self.guild.voice_client.source.volume = float(value) / 100.0
+        except Exception:
             pass
 
-    async def register_voice_channel(self, channel):
-        self.voice_client = await channel.connect(reconnect=True, timeout=None)
+    def volume_up(self):
+        self.volume = min(self.volume + 10, 100)
+
+    def volume_down(self):
+        self.volume = max(self.volume - 10, 10)
+
+    async def register_voice_channel(self, channel: discord.VoiceChannel):
+        perms = channel.permissions_for(self.guild.me)
+        if not perms.connect or not perms.speak:
+            raise CheckError(config.VOICE_PERMISSIONS_MISSING)
+
+        bot_vc = self.guild.voice_client
+        if bot_vc:
+            await bot_vc.move_to(channel)
+            # to avoid ClientException: Not connected to voice
+            await asyncio.sleep(1)
+        else:
+            await channel.connect(reconnect=True, timeout=VC_TIMEOUT)
+
+    def make_view(self):
+        if not self.is_active():
+            self.last_view = None
+            return None
+
+        is_empty = len(self.playlist) == 0
+
+        self.last_view = discord.ui.View(
+            MusicButton(
+                lambda _: self.prev_song(),
+                custom_id="prev",
+                disabled=not self.playlist.has_prev(),
+                emoji="⏮️",
+            ),
+            MusicButton(
+                lambda _: self.pause(),
+                custom_id="pause",
+                emoji="⏸️" if self.guild.voice_client.is_playing() else "▶️",
+            ),
+            MusicButton(
+                lambda _: self.next_song(forced=True),
+                custom_id="next",
+                disabled=not self.playlist.has_next(),
+                emoji="⏭️",
+            ),
+            MusicButton(
+                lambda _: self.loop(),
+                custom_id="loop",
+                disabled=is_empty,
+                emoji="🔁",
+                label="Loop: " + self.playlist.loop,
+            ),
+            MusicButton(
+                self.current_song_callback,
+                custom_id="current_song",
+                row=1,
+                disabled=self.current_song is None,
+                emoji="💿",
+            ),
+            MusicButton(
+                lambda _: self.shuffle(),
+                custom_id="shuffle",
+                row=1,
+                disabled=is_empty,
+                emoji="🔀",
+            ),
+            MusicButton(
+                self.queue_callback,
+                custom_id="queue",
+                row=1,
+                disabled=is_empty,
+                emoji="📜",
+            ),
+            MusicButton(
+                lambda _: self.stop_player(),
+                custom_id="stop",
+                row=1,
+                emoji="⏹️",
+                style=discord.ButtonStyle.red,
+            ),
+            MusicButton(
+                lambda _: self.volume_down(),
+                custom_id="volume_down",
+                row=2,
+                disabled=self.volume == 10,
+                emoji="🔉",
+            ),
+            MusicButton(
+                lambda _: self.volume_up(),
+                custom_id="volume_up",
+                row=2,
+                disabled=self.volume == 100,
+                emoji="🔊",
+            ),
+            timeout=None,
+        )
+
+        return self.last_view
+
+    async def current_song_callback(self, ctx):
+        await ctx.send(
+            embed=self.current_song.info.format_output(
+                config.SONGINFO_SONGINFO
+            ),
+        )
+
+    async def queue_callback(self, ctx):
+        await ctx.send(
+            embed=self.playlist.queue_embed(),
+        )
+
+    async def update_view(self, view=_not_provided):
+        msg = self.last_message
+        if not msg:
+            return
+        old_view = self.last_view
+        if view is None:
+            self.last_message = None
+        elif view is _not_provided:
+            view = self.make_view()
+        if view is old_view:
+            return
+        elif (
+            old_view
+            and view
+            and old_view.to_components() == view.to_components()
+        ):
+            return
+        try:
+            await msg.edit(view=view)
+        except discord.HTTPException as e:
+            if e.code == 50027:  # Invalid Webhook Token
+                try:
+                    self.last_message = await msg.channel.fetch_message(msg.id)
+                    await self.update_view(view)
+                except discord.NotFound:
+                    self.last_message = None
+            else:
+                print("Failed to update view:", e, file=sys.stderr)
+
+    def is_active(self) -> bool:
+        client = self.guild.voice_client
+        return client is not None and (
+            client.is_playing() or client.is_paused()
+        )
 
     def track_history(self):
         history_string = config.INFO_HISTORY_TITLE
@@ -47,242 +235,219 @@ class AudioController(object):
             history_string += "\n" + trackname
         return history_string
 
-    def next_song(self, error):
-        """Invoked after a song is finished. Plays the next song if there is one."""
+    def pause(self):
+        client = self.guild.voice_client
+        if client:
+            if client.is_playing():
+                client.pause()
+                self.add_task(self.timer.start(True))
+                return PauseState.PAUSED
+            elif client.is_paused():
+                client.resume()
+                return PauseState.RESUMED
+        return PauseState.NOTHING_TO_PAUSE
 
-        self.current_song = None
-        next_song = self.playlist.next()
+    def loop(self, mode=None):
+        if mode is None:
+            if self.playlist.loop == LoopMode.OFF:
+                mode = LoopMode.ALL
+            else:
+                mode = LoopMode.OFF
+
+        try:
+            mode = LoopMode(mode)
+        except ValueError:
+            return LoopState.INVALID
+
+        self.playlist.loop = mode
+
+        if mode == LoopMode.OFF:
+            return LoopState.DISABLED
+        return LoopState.ENABLED
+
+    def shuffle(self):
+        self.playlist.shuffle()
+        self.preload_queue()
+
+    def next_song(self, error=None, *, forced=False):
+        """Invoked after a song is finished
+        Plays the next song if there is one"""
+
+        if self.is_active():
+            self._next_song = self.playlist.next(forced)
+            self.guild.voice_client.stop()
+            return
+
+        if self.current_song:
+            self.playlist.add_name(self.current_song.info.title)
+            self.current_song = None
+
+        if self._next_song:
+            next_song = self._next_song
+            self._next_song = None
+        else:
+            next_song = self.playlist.next(forced)
 
         if next_song is None:
+            if not self.timer.triggered and self.guild.voice_client:
+                self.add_task(
+                    self.timer.start(
+                        not all(
+                            m.bot
+                            for m in self.guild.voice_client.channel.members
+                        )
+                    )
+                )
             return
 
         coro = self.play_song(next_song)
-        self.bot.loop.create_task(coro)
+        self.add_task(coro)
 
-    async def play_song(self, song):
+    async def play_song(self, song: Song):
         """Plays a song object"""
 
-        if song.info.title == None:
-            if song.host == linkutils.Sites.Spotify:
-                conversion = self.search_youtube(await linkutils.convert_spotify(song.info.webpage_url))
-                song.info.webpage_url = conversion
+        if not await loader.preload(song):
+            self.next_song(forced=True)
+            return
 
-            downloader = youtube_dl.YoutubeDL(
-                {'format': 'bestaudio', 'title': True, "cookiefile": config.COOKIE_PATH})
-            r = downloader.extract_info(
-                song.info.webpage_url, download=False)
+        if song.base_url is None:
+            print(
+                "Something is wrong."
+                " Refusing to play a song without base_url.",
+                file=sys.stderr,
+            )
+            self.next_song(forced=True)
+            return
 
-            song.base_url = r.get('url')
-            song.info.uploader = r.get('uploader')
-            song.info.title = r.get('title')
-            song.info.duration = r.get('duration')
-            song.info.webpage_url = r.get('webpage_url')
-            song.info.thumbnail = r.get('thumbnails')[0]['url']
-
-        self.playlist.add_name(song.info.title)
         self.current_song = song
 
-        self.voice_client.play(discord.FFmpegPCMAudio(
-            song.base_url, before_options='-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5'), after=lambda e: self.next_song(e))
+        self.guild.voice_client.play(
+            discord.FFmpegPCMAudio(
+                song.base_url,
+                before_options="-reconnect 1 -reconnect_streamed 1"
+                " -reconnect_delay_max 5",
+                options="-loglevel error",
+                stderr=sys.stderr,
+            ),
+            after=self.next_song,
+        )
 
-        self.voice_client.source = discord.PCMVolumeTransformer(
-            self.guild.voice_client.source)
-        self.voice_client.source.volume = float(self.volume) / 100.0
+        self.guild.voice_client.source = discord.PCMVolumeTransformer(
+            self.guild.voice_client.source
+        )
+        self.guild.voice_client.source.volume = float(self.volume) / 100.0
 
-        self.playlist.playque.popleft()
+        if (
+            self.bot.settings[self.guild].announce_songs
+            and self.command_channel
+        ):
+            await self.command_channel.send(
+                embed=song.info.format_output(config.SONGINFO_NOW_PLAYING)
+            )
 
-        for song in list(self.playlist.playque)[:config.MAX_SONG_PRELOAD]:
-            asyncio.ensure_future(self.preload(song))
+        self.preload_queue()
 
-    async def process_song(self, track):
-        """Adds the track to the playlist instance and plays it, if it is the first song"""
+    async def process_song(self, track: str) -> Optional[Song]:
+        """Adds the track to the playlist instance
+        Starts playing if it is the first song"""
 
-        host = linkutils.identify_url(track)
-        is_playlist = linkutils.identify_playlist(track)
-
-        if is_playlist != linkutils.Playlist_Types.Unknown:
-
-            await self.process_playlist(is_playlist, track)
-
-            if self.current_song == None:
-                await self.play_song(self.playlist.playque[0])
-                print("Playing {}".format(track))
-
-            song = Song(linkutils.Origins.Playlist,
-                        linkutils.Sites.Unknown)
-            return song
-
-        if host == linkutils.Sites.Unknown:
-            if linkutils.get_url(track) is not None:
-                return None
-
-            track = self.search_youtube(track)
-
-        if host == linkutils.Sites.Spotify:
-            title = await linkutils.convert_spotify(track)
-            track = self.search_youtube(title)
-
-        if host == linkutils.Sites.YouTube:
-            track = track.split("&list=")[0]
-
-        try:
-            downloader = youtube_dl.YoutubeDL(
-                {'format': 'bestaudio', 'title': True, "cookiefile": config.COOKIE_PATH})
-            r = downloader.extract_info(
-                track, download=False)
-        except:
-            downloader = youtube_dl.YoutubeDL(
-                {'title': True, "cookiefile": config.COOKIE_PATH})
-            r = downloader.extract_info(
-                track, download=False)
-
-        if r.get('thumbnails') is not None:
-            thumbnail = r.get('thumbnails')[len(
-                r.get('thumbnails')) - 1]['url']
+        loaded_song = await loader.load_song(track)
+        if not loaded_song:
+            return None
+        elif isinstance(loaded_song, Song):
+            self.playlist.add(loaded_song)
         else:
-            thumbnail = None
-
-        song = Song(linkutils.Origins.Default, host, base_url=r.get('url'), uploader=r.get('uploader'), title=r.get(
-            'title'), duration=r.get('duration'), webpage_url=r.get('webpage_url'), thumbnail=thumbnail)
-
-        self.playlist.add(song)
-        if self.current_song == None:
-            print("Playing {}".format(track))
-            await self.play_song(song)
-
-        return song
-
-    async def process_playlist(self, playlist_type, url):
-
-        if playlist_type == linkutils.Playlist_Types.YouTube_Playlist:
-
-            if ("playlist?list=" in url):
-                listid = url.split('=')[1]
-            else:
-                video = url.split('&')[0]
-                await self.process_song(video)
-                return
-
-            options = {
-                'format': 'bestaudio/best',
-                'extract_flat': True,
-                "cookiefile": config.COOKIE_PATH
-            }
-
-            with youtube_dl.YoutubeDL(options) as ydl:
-                r = ydl.extract_info(url, download=False)
-
-                for entry in r['entries']:
-
-                    link = "https://www.youtube.com/watch?v={}".format(
-                        entry['id'])
-
-                    song = Song(linkutils.Origins.Playlist,
-                                linkutils.Sites.YouTube, webpage_url=link)
-
-                    self.playlist.add(song)
-
-        if playlist_type == linkutils.Playlist_Types.Spotify_Playlist:
-            links = await linkutils.get_spotify_playlist(url)
-            for link in links:
-                song = Song(linkutils.Origins.Playlist,
-                            linkutils.Sites.Spotify, webpage_url=link)
+            for song in loaded_song:
                 self.playlist.add(song)
+            loaded_song = Song(
+                linkutils.Origins.Playlist, linkutils.Sites.Unknown
+            )
 
-        if playlist_type == linkutils.Playlist_Types.BandCamp_Playlist:
-            options = {
-                'format': 'bestaudio/best',
-                'extract_flat': True
-            }
-            with youtube_dl.YoutubeDL(options) as ydl:
-                r = ydl.extract_info(url, download=False)
+        if self.current_song is None:
+            print("Playing {}".format(track))
+            await self.play_song(self.playlist.playque[0])
 
-                for entry in r['entries']:
+        return loaded_song
 
-                    link = entry.get('url')
+    def add_task(self, coro: Coroutine):
+        task = self.bot.loop.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(lambda t: self._tasks.remove(t))
 
-                    song = Song(linkutils.Origins.Playlist,
-                                linkutils.Sites.Bandcamp, webpage_url=link)
+    async def _preload_queue(self):
+        rerun_needed = False
+        for song in list(
+            islice(self.playlist.playque, 1, config.MAX_SONG_PRELOAD)
+        ):
+            if not await loader.preload(song):
+                try:
+                    self.playlist.playque.remove(song)
+                    rerun_needed = True
+                except ValueError:
+                    # already removed
+                    pass
+        if rerun_needed:
+            self.add_task(self._preload_queue())
 
-                    self.playlist.add(song)
+    def preload_queue(self):
+        "Preloads the first MAX_SONG_PRELOAD songs asynchronously"
+        self.add_task(self._preload_queue())
 
-        for song in list(self.playlist.playque)[:config.MAX_SONG_PRELOAD]:
-            asyncio.ensure_future(self.preload(song))
-
-    async def preload(self, song):
-
-        if song.info.title != None:
-            return
-
-        def down(song):
-
-            if song.host == linkutils.Sites.Spotify:
-                song.info.webpage_url = self.search_youtube(song.info.title)
-
-            downloader = youtube_dl.YoutubeDL(
-                {'format': 'bestaudio', 'title': True, "cookiefile": config.COOKIE_PATH})
-            r = downloader.extract_info(
-                song.info.webpage_url, download=False)
-            song.base_url = r.get('url')
-            song.info.uploader = r.get('uploader')
-            song.info.title = r.get('title')
-            song.info.duration = r.get('duration')
-            song.info.webpage_url = r.get('webpage_url')
-            song.info.thumbnail = r.get('thumbnails')[0]['url']
-
-        if song.host == linkutils.Sites.Spotify:
-            song.info.title = await linkutils.convert_spotify(song.info.webpage_url)
-
-        loop = asyncio.get_event_loop()
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=config.MAX_SONG_PRELOAD)
-        await asyncio.wait(fs={loop.run_in_executor(executor, down, song)}, return_when=asyncio.ALL_COMPLETED)
-
-    def search_youtube(self, title):
-        """Searches youtube for the video title and returns the first results video link"""
-
-        # if title is already a link
-        if linkutils.get_url(title) is not None:
-            return title
-
-        options = {
-            'format': 'bestaudio/best',
-            'default_search': 'auto',
-            'noplaylist': True,
-            "cookiefile": config.COOKIE_PATH
-        }
-
-        with youtube_dl.YoutubeDL(options) as ydl:
-            r = ydl.extract_info(title, download=False)
-
-        videocode = r['entries'][0]['id']
-
-        return "https://www.youtube.com/watch?v={}".format(videocode)
-
-    async def stop_player(self):
+    def stop_player(self):
         """Stops the player and removes all songs from the queue"""
-        if self.guild.voice_client is None or (
-                not self.guild.voice_client.is_paused() and not self.guild.voice_client.is_playing()):
-            return
+        self.playlist.loop = LoopMode.OFF
+        self.playlist.clear()
         self.playlist.next()
-        self.playlist.playque.clear()
+
+        if not self.is_active():
+            return
+
         self.guild.voice_client.stop()
 
-    async def prev_song(self):
+    def prev_song(self) -> bool:
         """Loads the last song from the history into the queue and starts it"""
-        if len(self.playlist.playhistory) == 0:
-            return None
-        if self.guild.voice_client is None or (
-                not self.guild.voice_client.is_paused() and not self.guild.voice_client.is_playing()):
-            prev_song = self.playlist.prev()
-            # The Dummy is used if there is no song in the history
-            if prev_song == "Dummy":
-                self.playlist.next()
-                return None
-            await self.play_youtube(prev_song)
-        else:
-            self.playlist.prev()
-            self.playlist.prev()
-            self.guild.voice_client.stop()
 
-    def clear_queue(self):
-        self.playlist.playque.clear()
+        prev_song = self.playlist.prev()
+        if not prev_song:
+            return False
+
+        if not self.is_active():
+            self.add_task(self.play_song(prev_song))
+        else:
+            self._next_song = prev_song
+            self.guild.voice_client.stop()
+        return True
+
+    async def timeout_handler(self):
+        if not self.guild.voice_client:
+            return
+
+        sett = self.bot.settings[self.guild]
+
+        if sett.vc_timeout and (
+            not self.guild.voice_client.is_playing()
+            or all(m.bot for m in self.guild.voice_client.channel.members)
+        ):
+            await self.udisconnect()
+
+    async def uconnect(self, ctx, move=False):
+        author_vc = ctx.author.voice
+        bot_vc = self.guild.voice_client
+
+        if not author_vc:
+            raise CheckError(config.USER_NOT_IN_VC_MESSAGE)
+
+        if bot_vc is None or bot_vc.channel != author_vc.channel and move:
+            await self.register_voice_channel(author_vc.channel)
+        else:
+            raise CheckError(config.ALREADY_CONNECTED_MESSAGE)
+        return True
+
+    async def udisconnect(self):
+        self.stop_player()
+        await self.update_view(None)
+        if self.guild.voice_client is None:
+            return False
+        await self.guild.voice_client.disconnect(force=True)
+        self.timer.cancel()
+        return True

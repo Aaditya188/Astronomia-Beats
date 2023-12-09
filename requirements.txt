@@ -1,10 +1,11 @@
-discord
-discord.py[voice]
-aiohttp
-asyncio
-beautifulsoup4
-spotipy
-requests
-youtube_dl
-ffmpeg
-PyNaCl
+py-cord[voice] @ https://github.com/Krutyi-4el/pycord/archive/8a8f1e9bee16eba81efd16f8eaa2290bf327e1e1.zip
+yt-dlp==2023.10.13
+aiohttp==3.8.6
+beautifulsoup4==4.12.2
+spotipy==2.23.0
+emoji==2.8.0
+SQLAlchemy[asyncio]==2.0.23
+alembic==1.12.1
+aioconsole==0.6.2
+gunicron
+./config
