@@ -1,12 +1,15 @@
 py-cord[voice] @ https://github.com/Krutyi-4el/pycord/archive/8a8f1e9bee16eba81efd16f8eaa2290bf327e1e1.zip
+discord==1.7.3
+discord.py==1.7.3
 yt-dlp==2023.10.13
-aiohttp==3.8.6
+aiohttp==3.7.4
 beautifulsoup4==4.12.2
 spotipy==2.23.0
 emoji==2.8.0
 SQLAlchemy[asyncio]==2.0.23
+asyncio==3.4.3
 alembic==1.12.1
 aioconsole==0.6.2
-python-dotenv
-discord.py[voice]
-youtube-dl
+python-dotenv==0.15.0
+youtube-dl==2021.12.17
+youtube-search==2.1.0
