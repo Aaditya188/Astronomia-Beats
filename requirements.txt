@@ -1,4 +1,4 @@
-py-cord[voice]==2.5.0
+py-cord[voice] @ git+https://github.com/Krutyi-4el/pycord.git@8a8f1e9bee16eba81efd16f8eaa2290bf327e1e1
 discord
 discord.py
 yt-dlp==2023.10.13
